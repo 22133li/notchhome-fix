@@ -657,6 +657,11 @@ static double nhfix_fdDestination(id hg) {
 // calibrated 0.5.12), finger lifted (post-release animation), and no
 // icon-zoom close transition owning this exit.
 static BOOL nhfix_hgGateActive(id hg, NHFixHGState *state) {
+    // Disabled in 0.5.15 (transition census build): on device the gate
+    // only ever saw ONE post-release query — the system bakes the
+    // outcome animation at release, so query-time overrides cannot
+    // steer it. Kept intact for re-enable once the carrier is known.
+    return NO;
     if (!state || state->frozen < 3) {
         return NO;
     }
@@ -799,6 +804,97 @@ static NHFixHookSlot *nhfix_slot(NHFixHookSlot *__strong *slot,
     return *slot;
 }
 
+
+// Transition census (0.5.15, log-only): which transition modifier, if
+// any, carries the post-release animation of a switcher-entered app's
+// exit? Hook ONLY transitionWillBegin/DidEnd (uniform id-returning
+// signature, the same shape as the proven icon-zoom hook) on the
+// direct subclasses of SBTransitionSwitcherModifier. No geometry.
+static CFMutableDictionaryRef sNHFixCensusOrigBegin = NULL;
+static CFMutableDictionaryRef sNHFixCensusOrigEnd = NULL;
+static NSUInteger sNHFixCensusLogs = 0;
+
+static void nhfix_censusLog(const char *phase, id object) {
+    if (sNHFixCensusLogs >= 48) {
+        return;
+    }
+    sNHFixCensusLogs++;
+    long long dirValue = -9;
+    id layout = nil;
+    @try {
+        id dirObj = [object valueForKey:@"direction"];
+        if ([dirObj isKindOfClass:[NSNumber class]]) {
+            dirValue = [dirObj longLongValue];
+        }
+    } @catch (NSException *exception) {
+        dirValue = -8;
+    }
+    @try {
+        layout = [object valueForKey:@"appLayout"];
+    } @catch (NSException *exception) {
+        layout = nil;
+    }
+    nhfix_diagLogF("census %s class=%s dir=%lld layout=%p self=%p",
+        phase, class_getName(object_getClass(object)), dirValue, layout, object);
+}
+
+static id nhfix_censusBegin(id self, SEL _cmd) {
+    nhfix_censusLog("begin", self);
+    IMP orig = sNHFixCensusOrigBegin
+        ? (IMP)CFDictionaryGetValue(sNHFixCensusOrigBegin, (__bridge void *)object_getClass(self))
+        : NULL;
+    return orig ? ((id (*)(id, SEL))orig)(self, _cmd) : nil;
+}
+
+static id nhfix_censusEnd(id self, SEL _cmd) {
+    nhfix_censusLog("end", self);
+    IMP orig = sNHFixCensusOrigEnd
+        ? (IMP)CFDictionaryGetValue(sNHFixCensusOrigEnd, (__bridge void *)object_getClass(self))
+        : NULL;
+    return orig ? ((id (*)(id, SEL))orig)(self, _cmd) : nil;
+}
+
+static void nhfix_censusInstall(void) {
+    Class base = NSClassFromString(@"SBTransitionSwitcherModifier");
+    Class iconZoom = NSClassFromString(@"SBFullScreenToHomeIconZoomSwitcherModifier");
+    if (!base) {
+        nhfix_diagLogF("census: no base class");
+        return;
+    }
+    sNHFixCensusOrigBegin = CFDictionaryCreateMutable(NULL, 0, NULL, NULL);
+    sNHFixCensusOrigEnd = CFDictionaryCreateMutable(NULL, 0, NULL, NULL);
+    int total = objc_getClassList(NULL, 0);
+    Class *classes = (Class *)malloc(sizeof(Class) * (total > 0 ? total : 1));
+    objc_getClassList(classes, total);
+    NSMutableString *names = [NSMutableString string];
+    NSUInteger hooked = 0;
+    for (int i = 0; i < total; i++) {
+        Class cls = classes[i];
+        if (!cls || cls == iconZoom || class_getSuperclass(cls) != base) {
+            continue;
+        }
+        Method beginMethod = class_getInstanceMethod(cls, @selector(transitionWillBegin));
+        Method endMethod = class_getInstanceMethod(cls, @selector(transitionDidEnd));
+        if (beginMethod) {
+            CFDictionarySetValue(sNHFixCensusOrigBegin, (__bridge void *)cls,
+                (void *)method_getImplementation(beginMethod));
+            class_replaceMethod(cls, @selector(transitionWillBegin),
+                (IMP)nhfix_censusBegin, method_getTypeEncoding(beginMethod));
+        }
+        if (endMethod) {
+            CFDictionarySetValue(sNHFixCensusOrigEnd, (__bridge void *)cls,
+                (void *)method_getImplementation(endMethod));
+            class_replaceMethod(cls, @selector(transitionDidEnd),
+                (IMP)nhfix_censusEnd, method_getTypeEncoding(endMethod));
+        }
+        hooked++;
+        [names appendFormat:@"%s ", class_getName(cls)];
+    }
+    free(classes);
+    nhfix_diagLogF("census installs=%lu classes: %s",
+        (unsigned long)hooked, names.UTF8String);
+}
+
 static void nhfix_installAll(void) {
     NSString *modifier = kNHFixModifierClass;
 
@@ -848,6 +944,7 @@ static void nhfix_installAll(void) {
                                            returnType:"@" argumentTypes:@[@"@"]];
 
     nhfix_hgInstall();
+    nhfix_censusInstall();
 
     nhfix_diagLogF("fix installs: begin=%d end=%d int=%d frame=%d scale=%d corner=%d anim=%d",
         (int)sNHFixSlotWillBegin.installed, (int)sNHFixSlotDidEnd.installed,
