@@ -1,6 +1,6 @@
 Package: com.tsangbaby.notchhome
 Name: NotchHome
-Description: Original NotchHome 0.5.0 package plus zzNotchHomeFix supplement (0.5.13: HomeGesture post-release notch blend gated on FinalDestination==Home) for app exits that bypass the icon-zoom transition (e.g. apps entered from the app switcher). Original dylib and plist are byte-identical to 0.5.0.
+Description: Original NotchHome 0.5.0 package plus zzNotchHomeFix supplement (0.5.14: HomeGesture post-release notch blend gated on FinalDestination==Home) for app exits that bypass the icon-zoom transition (e.g. apps entered from the app switcher). Original dylib and plist are byte-identical to 0.5.0.
 Maintainer: Tsangbaby
 Author: Tsangbaby
 Section: Tweaks
@@ -8,5 +8,5 @@ Depends: mobilesubstrate, firmware (>= 15.0)
 Conflicts: com.notchhome.tweak, com.axs.notchhome
 Replaces: com.notchhome.tweak
 Architecture: iphoneos-arm64e
-Version: 0.5.13
+Version: 0.5.14
 Installed-Size: 340

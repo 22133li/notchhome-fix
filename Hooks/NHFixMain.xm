@@ -596,9 +596,11 @@ static void nhfix_fdObserveDestination(id hg) {
 typedef struct {
     double lastTs;
     NSUInteger frozen;
-    double ramp;
-    NSUInteger overrides;
 } NHFixHGState;
+
+static double sNHFixHGRamp = 0;
+static NSUInteger sNHFixHGOverrides = 0;
+static NSTimeInterval sNHFixHGLastGate = 0;
 
 static NHFixHGState *nhfix_hgStateFor(id object) {
     static CFMutableDictionaryRef states = NULL;
@@ -621,12 +623,6 @@ static void nhfix_hgObservePost(id object) {
     char *hgBase = (char *)(__bridge void *)object;
     double touchTs = *(double *)(hgBase + 400);
     if (touchTs != state->lastTs) {
-        if (state->frozen >= 3) {
-            // A post-release phase had been reached and a new touch
-            // stream is starting: reset the blend for the new gesture.
-            state->ramp = 0;
-            state->overrides = 0;
-        }
         state->lastTs = touchTs;
         state->frozen = 0;
     } else {
@@ -682,9 +678,15 @@ static CGRect nhfix_hgFrame(id self, SEL _cmd, NSUInteger index) {
         nhfix_hgObservePost(self);
         NHFixHGState *state = nhfix_hgStateFor(self);
         if (nhfix_hgGateActive(self, state)) {
-            state->ramp = MIN(1.0, state->ramp + 0.07);
-            state->overrides++;
-            CGFloat k = (CGFloat)state->ramp;
+            NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+            if (sNHFixHGLastGate > 0 && (now - sNHFixHGLastGate) > 0.8) {
+                sNHFixHGRamp = 0;
+                sNHFixHGOverrides = 0;
+            }
+            sNHFixHGLastGate = now;
+            sNHFixHGRamp = MIN(1.0, sNHFixHGRamp + 0.07);
+            sNHFixHGOverrides++;
+            CGFloat k = (CGFloat)sNHFixHGRamp;
             CGRect screen = [[UIScreen mainScreen] bounds];
             CGPoint center = CGPointMake(CGRectGetMidX(result), CGRectGetMidY(result));
             CGPoint target = CGPointMake(CGRectGetWidth(screen) / 2.0, -30.0);
@@ -692,9 +694,9 @@ static CGRect nhfix_hgFrame(id self, SEL _cmd, NSUInteger index) {
                                           center.y + (target.y - center.y) * k);
             result.origin.x = blended.x - CGRectGetWidth(result) / 2.0;
             result.origin.y = blended.y - CGRectGetHeight(result) / 2.0;
-            if (state->overrides == 1 || (state->overrides % 20) == 0) {
+            if (sNHFixHGOverrides == 1 || (sNHFixHGOverrides % 20) == 0) {
                 nhfix_hgLogF("hgfix frame k=%.2f ov=%lu -> (%.0f,%.0f)",
-                    k, (unsigned long)state->overrides, result.origin.x, result.origin.y);
+                    k, (unsigned long)sNHFixHGOverrides, result.origin.x, result.origin.y);
             }
         }
     }
@@ -716,9 +718,9 @@ static double nhfix_hgScale(id self, SEL _cmd, NSUInteger index) {
         nhfix_hgObservePost(self);
         NHFixHGState *state = nhfix_hgStateFor(self);
         if (nhfix_hgGateActive(self, state)) {
-            CGFloat k = (CGFloat)state->ramp;
+            CGFloat k = (CGFloat)sNHFixHGRamp;
             result = result + (0.061 - result) * (double)k;
-            if ((state->overrides % 20) == 1) {
+            if ((sNHFixHGOverrides % 20) == 1) {
                 nhfix_hgLogF("hgfix scale k=%.2f -> %.3f", k, result);
             }
         }
@@ -740,7 +742,7 @@ static double nhfix_hgCorner(id self, SEL _cmd, NSUInteger index) {
         nhfix_hgObservePost(self);
         NHFixHGState *state = nhfix_hgStateFor(self);
         if (nhfix_hgGateActive(self, state)) {
-            CGFloat k = (CGFloat)state->ramp;
+            CGFloat k = (CGFloat)sNHFixHGRamp;
             CGFloat target = (CGFloat)(CGRectGetWidth([[UIScreen mainScreen] bounds]) * 0.2);
             result = result + ((double)target - result) * (double)k;
         }
