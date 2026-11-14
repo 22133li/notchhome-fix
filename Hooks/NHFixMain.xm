@@ -635,10 +635,10 @@ static id nhfix_hgEnd(id self, SEL _cmd) {
 static void *sNHFixFDLastChild = NULL;
 
 static void nhfix_fdDumpFieldsOnce(id child) {
-    if (!child || (void *)child == sNHFixFDLastChild) {
+    if (!child || (__bridge void *)child == sNHFixFDLastChild) {
         return;
     }
-    sNHFixFDLastChild = (void *)child;
+    sNHFixFDLastChild = (__bridge void *)child;
     Class stop = NSClassFromString(@"NSObject");
     for (Class cls = object_getClass(child); cls && cls != stop; cls = class_getSuperclass(cls)) {
         unsigned int count = 0;
