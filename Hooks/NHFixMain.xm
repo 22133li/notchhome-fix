@@ -66,6 +66,10 @@ static const double kNHFixOtherScaleResponse = 0.550;
 static BOOL sNHFixEnabled = NO;
 
 static NHFixHookSlot *sNHFixSlotWillBegin;
+// Wall-clock of the most recent icon-zoom CLOSE begin (dir==1): the
+// HomeGesture supplement must not fight the original package on legs
+// the icon-zoom transition owns.
+static NSTimeInterval sNHFixLastIconZoomCloseBegin = 0;
 static NHFixHookSlot *sNHFixSlotDidEnd;
 static NHFixHookSlot *sNHFixSlotInterrupt;
 static NHFixHookSlot *sNHFixSlotFrame;
@@ -197,6 +201,9 @@ static id nhfix_hookWillBegin(id self, SEL _cmd) {
                 dirValue = -8;
             }
             state.direction = dirValue;
+            if (dirValue == 1) {
+                sNHFixLastIconZoomCloseBegin = [NSDate timeIntervalSinceReferenceDate];
+            }
             nhfix_diagLogF("fix begin self=%p sample=%lld dir=%lld boundsOK=%d layout=%p",
                 self, (long long)state.sampleAtBegin, dirValue,
                 state.boundsValid ? 1 : 0, sNHFixCurrentLayout);
@@ -604,9 +611,6 @@ static id nhfix_hgBegin(id self, SEL _cmd) {
             layout = nil;
         }
         nhfix_diagLogF("hg begin self=%p dir=%lld layout=%p", self, dirValue, layout);
-        nhfix_hgDumpFieldsOnce(self);
-        sNHFixHGMidDumped = NO;
-        nhfix_hgDumpVals(self, "begin");
     }
     id result = orig ? ((id (*)(id, SEL))orig)(self, _cmd) : nil;
     sNHFixHGInBegin = NO;
@@ -618,7 +622,6 @@ static id nhfix_hgEnd(id self, SEL _cmd) {
     if (logs < 20) {
         logs++;
         nhfix_diagLogF("hg end self=%p", self);
-        nhfix_hgDumpVals(self, "end");
     }
     IMP orig = nhfix_savedIMP(sNHFixSlotHGEnd);
     return orig ? ((id (*)(id, SEL))orig)(self, _cmd) : nil;
@@ -715,7 +718,18 @@ static void nhfix_fdObserveDestination(id hg) {
     }
 }
 
-static void nhfix_hgObservePost(id object) {
+// HomeGesture supplement state (0.5.13), kept PER INSTANCE.
+// _lastTouchTimestamp (double @400, from the 0.5.8 field dump) freezes
+// once the finger lifts; `frozen` counts consecutive geometry queries
+// since the last change. `ramp` is the blend weight toward the notch.
+typedef struct {
+    double lastTs;
+    NSUInteger frozen;
+    double ramp;
+    NSUInteger overrides;
+} NHFixHGState;
+
+static NHFixHGState *nhfix_hgStateFor(id object) {
     static CFMutableDictionaryRef states = NULL;
     if (!states) {
         states = CFDictionaryCreateMutable(NULL, 0, NULL, NULL);
@@ -723,48 +737,98 @@ static void nhfix_hgObservePost(id object) {
     if (CFDictionaryGetCount(states) > 64) {
         CFDictionaryRemoveAllValues(states);
     }
-    // state packed in a small malloc'd struct stored as a CF value
-    typedef struct { double lastTs; NSUInteger frozen; BOOL sampled; } NHFixHGState;
     NHFixHGState *state = (NHFixHGState *)CFDictionaryGetValue(states, (__bridge void *)object);
     if (!state) {
         state = (NHFixHGState *)calloc(1, sizeof(NHFixHGState));
         CFDictionarySetValue(states, (__bridge void *)object, state);
     }
-    static NSUInteger sEpisodes = 0;
+    return state;
+}
+
+static void nhfix_hgObservePost(id object) {
+    NHFixHGState *state = nhfix_hgStateFor(object);
     char *hgBase = (char *)(__bridge void *)object;
     double touchTs = *(double *)(hgBase + 400);
-    BOOL gestureEnded = *(BOOL *)(hgBase + 483);
     if (touchTs != state->lastTs) {
+        if (state->frozen >= 3) {
+            // A post-release phase had been reached and a new touch
+            // stream is starting: reset the blend for the new gesture.
+            state->ramp = 0;
+            state->overrides = 0;
+        }
         state->lastTs = touchTs;
         state->frozen = 0;
-        state->sampled = NO;
     } else {
         state->frozen++;
-        if (state->frozen >= 5 && !state->sampled && sEpisodes < 8) {
-            state->sampled = YES;
-            sEpisodes++;
-            char tag[20];
-            snprintf(tag, sizeof(tag), "post%lu", (unsigned long)sEpisodes);
-            nhfix_hgDumpBoth(object, tag);
-            nhfix_hgLogF("hg post-note ep=%lu ended=%d", (unsigned long)sEpisodes, (int)gestureEnded);
-        }
     }
 }
 
+static double nhfix_fdDestination(id hg) {
+    static Ivar sFDIvar = NULL;
+    static Ivar sDestIvar = NULL;
+    if (!sFDIvar) {
+        sFDIvar = class_getInstanceVariable(object_getClass(hg), "_finalDestinationModifier");
+        if (!sFDIvar) {
+            return -1;
+        }
+    }
+    id child = object_getIvar(hg, sFDIvar);
+    if (!child) {
+        return -1;
+    }
+    if (!sDestIvar) {
+        sDestIvar = class_getInstanceVariable(object_getClass(child), "_lastFinalDestination");
+        if (!sDestIvar) {
+            return -1;
+        }
+    }
+    char *childBase = (char *)(__bridge void *)child;
+    return *(double *)(childBase + ivar_getOffset(sDestIvar));
+}
+
+// Triple gate for the supplement: destination committed Home (4,
+// calibrated 0.5.12), finger lifted (post-release animation), and no
+// icon-zoom close transition owning this exit.
+static BOOL nhfix_hgGateActive(id hg, NHFixHGState *state) {
+    if (!state || state->frozen < 3) {
+        return NO;
+    }
+    if (nhfix_fdDestination(hg) != 4.0) {
+        return NO;
+    }
+    if (sNHFixLastIconZoomCloseBegin > 0 &&
+        ([NSDate timeIntervalSinceReferenceDate] - sNHFixLastIconZoomCloseBegin) < 1.5) {
+        return NO;
+    }
+    return YES;
+}
+
 static CGRect nhfix_hgFrame(id self, SEL _cmd, NSUInteger index) {
-    nhfix_hgDumpFieldsOnce(self);
     IMP orig = nhfix_savedIMP(sNHFixSlotHGFrame);
     CGRect result = orig ? ((CGRect (*)(id, SEL, NSUInteger))orig)(self, _cmd, index) : CGRectZero;
     if (index == 0) {
         nhfix_fdObserveDestination(self);
         nhfix_hgObservePost(self);
-    }
-    if (!sNHFixHGMidDumped) {
-        sNHFixHGMidDumped = YES;
-        nhfix_hgDumpBoth(self, "mid");
+        NHFixHGState *state = nhfix_hgStateFor(self);
+        if (nhfix_hgGateActive(self, state)) {
+            state->ramp = MIN(1.0, state->ramp + 0.07);
+            state->overrides++;
+            CGFloat k = (CGFloat)state->ramp;
+            CGRect screen = [[UIScreen mainScreen] bounds];
+            CGPoint center = CGPointMake(CGRectGetMidX(result), CGRectGetMidY(result));
+            CGPoint target = CGPointMake(CGRectGetWidth(screen) / 2.0, -30.0);
+            CGPoint blended = CGPointMake(center.x + (target.x - center.x) * k,
+                                          center.y + (target.y - center.y) * k);
+            result.origin.x = blended.x - CGRectGetWidth(result) / 2.0;
+            result.origin.y = blended.y - CGRectGetHeight(result) / 2.0;
+            if (state->overrides == 1 || (state->overrides % 20) == 0) {
+                nhfix_hgLogF("hgfix frame k=%.2f ov=%lu -> (%.0f,%.0f)",
+                    k, (unsigned long)state->overrides, result.origin.x, result.origin.y);
+            }
+        }
     }
     static NSUInteger logs = 0;
-    if (logs < 80) {
+    if (logs < 40) {
         logs++;
         nhfix_diagLogF("hg frame idx=%lu from=(%.0f,%.0f,%.0f,%.0f)",
             (unsigned long)index, CGRectGetMinX(result), CGRectGetMinY(result),
@@ -777,22 +841,38 @@ static double nhfix_hgScale(id self, SEL _cmd, NSUInteger index) {
     IMP orig = nhfix_savedIMP(sNHFixSlotHGScale);
     double result = orig ? ((double (*)(id, SEL, NSUInteger))orig)(self, _cmd, index) : 1.0;
     if (index == 0) {
-        static NSUInteger idx0Queries = 0;
-        static NSUInteger trajSamples = 0;
-        idx0Queries++;
-        if ((idx0Queries % 20) == 0 && trajSamples < 30) {
-            trajSamples++;
-            char tag[16];
-            snprintf(tag, sizeof(tag), "traj%lu", (unsigned long)trajSamples);
-            nhfix_hgDumpBoth(self, tag);
-        }
         nhfix_fdObserveDestination(self);
         nhfix_hgObservePost(self);
+        NHFixHGState *state = nhfix_hgStateFor(self);
+        if (nhfix_hgGateActive(self, state)) {
+            CGFloat k = (CGFloat)state->ramp;
+            result = result + (0.061 - result) * (double)k;
+            if ((state->overrides % 20) == 1) {
+                nhfix_hgLogF("hgfix scale k=%.2f -> %.3f", k, result);
+            }
+        }
     }
     static NSUInteger logs = 0;
-    if (logs < 80) {
+    if (logs < 40) {
         logs++;
         nhfix_diagLogF("hg scale idx=%lu from=%.3f", (unsigned long)index, result);
+    }
+    return result;
+}
+
+static NHFixHookSlot *sNHFixSlotHGCorner;
+
+static double nhfix_hgCorner(id self, SEL _cmd, NSUInteger index) {
+    IMP orig = nhfix_savedIMP(sNHFixSlotHGCorner);
+    double result = orig ? ((double (*)(id, SEL, NSUInteger))orig)(self, _cmd, index) : 0.0;
+    if (index == 0) {
+        nhfix_hgObservePost(self);
+        NHFixHGState *state = nhfix_hgStateFor(self);
+        if (nhfix_hgGateActive(self, state)) {
+            CGFloat k = (CGFloat)state->ramp;
+            CGFloat target = (CGFloat)(CGRectGetWidth([[UIScreen mainScreen] bounds]) * 0.2);
+            result = result + ((double)target - result) * (double)k;
+        }
     }
     return result;
 }
@@ -824,9 +904,16 @@ static void nhfix_hgInstall(void) {
         [sNHFixSlotHGScale nhfix_installWithReplacement:(IMP)nhfix_hgScale
                                               returnType:"d" argumentTypes:@[@"I"]];
     }
-    nhfix_diagLogF("hg installs: begin=%d end=%d frame=%d scale=%d",
+    nhfix_slot(&sNHFixSlotHGCorner, kNHFixHGClass, @"cornerRadiusForIndex:");
+    if (![sNHFixSlotHGCorner nhfix_installWithReplacement:(IMP)nhfix_hgCorner
+                                               returnType:"d" argumentTypes:@[@"Q"]]) {
+        [sNHFixSlotHGCorner nhfix_installWithReplacement:(IMP)nhfix_hgCorner
+                                              returnType:"d" argumentTypes:@[@"I"]];
+    }
+    nhfix_diagLogF("hg installs: begin=%d end=%d frame=%d scale=%d corner=%d",
         (int)sNHFixSlotHGBegin.installed, (int)sNHFixSlotHGEnd.installed,
-        (int)sNHFixSlotHGFrame.installed, (int)sNHFixSlotHGScale.installed);
+        (int)sNHFixSlotHGFrame.installed, (int)sNHFixSlotHGScale.installed,
+        (int)sNHFixSlotHGCorner.installed);
 }
 
 #pragma mark - Installation
