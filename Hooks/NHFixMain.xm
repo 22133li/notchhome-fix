@@ -22,14 +22,13 @@
 //   (device video, 2026-11-14: direct folder launch sucks, the
 //   switcher re-entry of the same app does not).
 //
-// Supplement rule (all must hold, per query, on the zoom modifier):
+// Supplement rule (v2, set by diag_4 on device): all must hold, per
+// query, on the zoom modifier:
 //   - a transition is in progress on this instance;
-//   - the instance's first sample (taken by this hook at
-//     transitionWillBegin, before the original's handler) was 1 —
-//     the signature of a leg that began effectively-at-home;
-//   - the LIVE _isEffectivelyHome (called through the chain, which
-//     returns the stock value) is YES — the destination is home, so
-//     opening legs (live = NO) are never touched;
+//   - the transition direction captured at transitionWillBegin is 1
+//     (closing to home; openings are 0 — the v1 first-sample/live-IH
+//     rule fired on openings, because both signals read "at home"
+//     there too; direction separates the legs without exception);
 //   - the original's own output for this index is still the STOCK
 //     icon-zoom value (frame: square icon-sized frame; scale: ~0.150).
 //     If the original fired itself (fullscreen frame / 0.061) or the
@@ -74,6 +73,7 @@ static id sNHFixCurrentLayout = nil;
 
 @interface NHFixLegState : NSObject
 @property (nonatomic, assign) NSInteger sampleAtBegin;
+@property (nonatomic, assign) NSInteger direction;
 @property (nonatomic, assign) BOOL inTransition;
 @property (nonatomic, assign) NSInteger markedIndex;
 @property (nonatomic, assign) BOOL supplementFired;
@@ -85,6 +85,7 @@ static id sNHFixCurrentLayout = nil;
     self = [super init];
     if (self) {
         _sampleAtBegin = -1;
+        _direction = -9;
         _markedIndex = -1;
         _bounds = CGRectZero;
     }
@@ -137,10 +138,20 @@ static BOOL nhfix_armed(NHFixLegState *state, id modifier) {
     if (!sNHFixEnabled || ![NSThread isMainThread] || !state) {
         return NO;
     }
-    if (!state.inTransition || state.sampleAtBegin != 1 || !state.boundsValid) {
-        return NO;
-    }
-    return nhfix_liveIsEffectivelyHome(modifier);
+    // v2 (diag_4, 2026-11-15): the v1 discriminator was wrong on
+    // device. Every opening leg sampled 1 AND returned live
+    // _isEffectivelyHome == YES during its geometry queries, so v1
+    // supplemented OPENINGS (app opened out of the notch), while the
+    // missed closing legs sample 0 at willBegin and were skipped.
+    // The signal that separates the legs cleanly in the log is the
+    // transition direction captured at willBegin: openings are 0,
+    // closings are 1, without exception in the captured session.
+    // Combined with the stock-output check in each geometry hook
+    // (the original's own fired legs present notch values, not
+    // stock), direction == 1 supplements exactly the closing legs
+    // the original missed and nothing else.
+    (void)modifier;
+    return state.inTransition && state.direction == 1 && state.boundsValid;
 }
 
 #pragma mark - Lifecycle hooks
@@ -180,6 +191,7 @@ static id nhfix_hookWillBegin(id self, SEL _cmd) {
             } @catch (NSException *exception) {
                 dirValue = -8;
             }
+            state.direction = dirValue;
             nhfix_diagLogF("fix begin self=%p sample=%lld dir=%lld boundsOK=%d layout=%p",
                 self, (long long)state.sampleAtBegin, dirValue,
                 state.boundsValid ? 1 : 0, sNHFixCurrentLayout);
@@ -332,10 +344,7 @@ static id nhfix_hookAnimAttrs(id self, SEL _cmd, id element) {
         return result;
     }
     NHFixLegState *state = nhfix_legState(sNHFixCurrentModifier, NO);
-    if (!state || !state.inTransition || state.sampleAtBegin != 1) {
-        return result;
-    }
-    if (!nhfix_liveIsEffectivelyHome(sNHFixCurrentModifier)) {
+    if (!state || !state.inTransition || state.direction != 1) {
         return result;
     }
     const char *elemClass = object_getClassName(element);
@@ -389,8 +398,11 @@ static void nhfix_installAll(void) {
                                         returnType:"@" argumentTypes:@[]];
 
     nhfix_slot(&sNHFixSlotInterrupt, modifier, @"interruptAndEndTransition");
-    [sNHFixSlotInterrupt nhfix_installWithReplacement:(IMP)nhfix_hookInterrupt
-                                           returnType:"@" argumentTypes:@[]];
+    if (![sNHFixSlotInterrupt nhfix_installWithReplacement:(IMP)nhfix_hookInterrupt
+                                                returnType:"@" argumentTypes:@[]]) {
+        [sNHFixSlotInterrupt nhfix_installWithReplacement:(IMP)nhfix_hookInterrupt
+                                               returnType:"v" argumentTypes:@[]];
+    }
 
     nhfix_slot(&sNHFixSlotFrame, modifier, @"frameForIndex:");
     if (![sNHFixSlotFrame nhfix_installWithReplacement:(IMP)nhfix_hookFrame

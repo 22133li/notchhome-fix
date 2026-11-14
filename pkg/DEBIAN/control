@@ -1,0 +1,12 @@
+Package: com.tsangbaby.notchhome
+Name: NotchHome
+Description: Notch Suction Polish For iOS15+ (0.5.1: original 0.5.0 dylib unchanged + zzNotchHomeFix companion patch — folder apps re-entered from the switcher now also suck to the notch on exit)
+Maintainer: Tsangbaby
+Author: Tsangbaby
+Section: Tweaks
+Depends: mobilesubstrate, firmware (>= 15.0)
+Conflicts: com.notchhome.tweak, com.axs.notchhome
+Replaces: com.notchhome.tweak
+Architecture: iphoneos-arm64e
+Version: 0.5.1
+Installed-Size: 340
