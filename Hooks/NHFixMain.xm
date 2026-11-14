@@ -30,9 +30,13 @@
 //     rule fired on openings, because both signals read "at home"
 //     there too; direction separates the legs without exception);
 //   - the original's own output for this index is still the STOCK
-//     icon-zoom value (frame: square icon-sized frame; scale: ~0.150).
-//     If the original fired itself (fullscreen frame / 0.061) or the
-//     index is a neighbour (fullscreen / 1.0), pass through untouched.
+//     icon-zoom value (scale ~0.150; frame either the square
+//     icon-sized frame, or — diag_5 — the plain fullscreen fallback
+//     frame the system returns when the app has no icon position in
+//     the current layout, supplemented only for the index the scale
+//     hook marked as stock). If the original fired itself (notch
+//     frame / 0.061) or the index is a neighbour (fullscreen / 1.0),
+//     pass through untouched.
 // Supplement values are the original's own measured outputs:
 // frame = fullscreen recentered to (boundsW/2, -30), scale 0.061,
 // corner radii = boundsW * 0.2; animation attributes use the
@@ -246,8 +250,36 @@ static CGRect nhfix_hookFrame(id self, SEL _cmd, NSUInteger index) {
     CGFloat w = CGRectGetWidth(original);
     CGFloat h = CGRectGetHeight(original);
     if (h > w + 1.0) {
-        // Fullscreen-sized: either the original already fired (frame
-        // recentered to the notch) or a neighbour layout. Pass through.
+        // Fullscreen-sized. Two shapes reach here (diag_5):
+        //  - the original FIRED: fullscreen frame recentered to the
+        //    notch (midY == -30). Pass through.
+        //  - the STOCK fullscreen fallback: when the app has no icon
+        //    position in the current layout (folder app re-entered
+        //    from the switcher), the system returns the plain
+        //    fullscreen frame (origin 0,0, bounds size) while scale
+        //    stays the stock icon-zoom 0.150. v2 passed this through,
+        //    so scale shrank the window in place instead of flying
+        //    it to the notch. Supplement it — but only for the index
+        //    the scale hook has marked as stock this leg, so a
+        //    neighbour's fullscreen frame (scale 1.0) is untouched.
+        CGFloat bw0 = CGRectGetWidth(state.bounds);
+        CGFloat bh0 = CGRectGetHeight(state.bounds);
+        BOOL stockFallback = fabs(CGRectGetMinX(original)) < 1.0 &&
+            fabs(CGRectGetMinY(original)) < 1.0 &&
+            fabs(w - bw0) < 1.0 && fabs(h - bh0) < 1.0;
+        BOOL marked = state.markedIndex == (NSInteger)index;
+        static NSUInteger fsLogs = 0;
+        if (fsLogs < 20) {
+            fsLogs++;
+            nhfix_diagLogF("fix framefs idx=%lu from=(%.0f,%.0f,%.0f,%.0f) fallback=%d marked=%lld",
+                (unsigned long)index, CGRectGetMinX(original), CGRectGetMinY(original),
+                w, h, stockFallback, (long long)state.markedIndex);
+        }
+        if (stockFallback && marked) {
+            state.supplementFired = YES;
+            nhfix_diagFrameActive++;
+            return CGRectMake(0.0, kNHFixNotchCenterY - bh0 / 2.0, bw0, bh0);
+        }
         return original;
     }
     if (w <= 0.0 || h <= 0.0) {
