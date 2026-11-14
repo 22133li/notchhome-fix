@@ -446,6 +446,99 @@ static NHFixHookSlot *nhfix_slot(NHFixHookSlot *__strong *slot,
 // guard on begin. Goal: see the frame/scale it serves for the
 // exiting app during a switcher-entered exit.
 
+
+// Field-table dump + scalar sampling for the HG probe (0.5.7):
+// names/offsets/encodings once per process; scalar values (BOOL and
+// integer/float ivars, read by offset — no KVC, no side effects) at
+// begin, at the first geometry query of the leg, and at end. A
+// committed-home exit vs these snapshots should expose the field
+// that carries the destination/commit state.
+static BOOL sNHFixHGFieldsDumped = NO;
+static BOOL sNHFixHGMidDumped = NO;
+
+static void nhfix_hgDumpFieldsOnce(id object) {
+    if (sNHFixHGFieldsDumped || !object) {
+        return;
+    }
+    sNHFixHGFieldsDumped = YES;
+    Class stop = NSClassFromString(@"NSObject");
+    for (Class cls = object_getClass(object); cls && cls != stop; cls = class_getSuperclass(cls)) {
+        unsigned int count = 0;
+        Ivar *ivars = class_copyIvarList(cls, &count);
+        for (unsigned int i = 0; i < count; i++) {
+            const char *name = ivar_getName(ivars[i]);
+            const char *enc = ivar_getTypeEncoding(ivars[i]);
+            nhfix_diagLogF("hg field %s %s %s @%td",
+                class_getName(cls), name ? name : "?", enc ? enc : "?",
+                ivar_getOffset(ivars[i]));
+        }
+        free(ivars);
+    }
+}
+
+static void nhfix_hgDumpVals(id object, const char *tag) {
+    if (!object) {
+        return;
+    }
+    @try {
+        Class stop = NSClassFromString(@"NSObject");
+        NSMutableString *chunk = [NSMutableString string];
+        int chunkIndex = 0;
+        int inChunk = 0;
+        for (Class cls = object_getClass(object); cls && cls != stop; cls = class_getSuperclass(cls)) {
+            unsigned int count = 0;
+            Ivar *ivars = class_copyIvarList(cls, &count);
+            for (unsigned int i = 0; i < count; i++) {
+                const char *enc = ivar_getTypeEncoding(ivars[i]);
+                if (!enc) {
+                    continue;
+                }
+                char kind = enc[0];
+                if (kind != 'B' && kind != 'c' && kind != 'i' && kind != 's' &&
+                    kind != 'l' && kind != 'q' && kind != 'I' && kind != 'S' &&
+                    kind != 'L' && kind != 'Q' && kind != 'f' && kind != 'd') {
+                    continue;
+                }
+                const char *name = ivar_getName(ivars[i]);
+                char *base = (char *)object + ivar_getOffset(ivars[i]);
+                char value[64];
+                if (kind == 'f') {
+                    snprintf(value, sizeof(value), "%.3f", (double)*(float *)base);
+                } else if (kind == 'd') {
+                    snprintf(value, sizeof(value), "%.3f", *(double *)base);
+                } else if (kind == 'B' || kind == 'c') {
+                    snprintf(value, sizeof(value), "%d", (int)*(signed char *)base);
+                } else if (kind == 's') {
+                    snprintf(value, sizeof(value), "%d", (int)*(short *)base);
+                } else if (kind == 'i') {
+                    snprintf(value, sizeof(value), "%d", *(int *)base);
+                } else if (kind == 'l' || kind == 'q') {
+                    snprintf(value, sizeof(value), "%lld", *(long long *)base);
+                } else if (kind == 'S') {
+                    snprintf(value, sizeof(value), "%u", (unsigned int)*(unsigned short *)base);
+                } else if (kind == 'I') {
+                    snprintf(value, sizeof(value), "%u", *(unsigned int *)base);
+                } else {
+                    snprintf(value, sizeof(value), "%llu", *(unsigned long long *)base);
+                }
+                [chunk appendFormat:@"%s=%s ", name ? name : "?", value];
+                inChunk++;
+                if (inChunk >= 8) {
+                    nhfix_diagLogF("hg vals@%s #%d: %s", tag, chunkIndex++, chunk.UTF8String);
+                    [chunk setString:@""];
+                    inChunk = 0;
+                }
+            }
+            free(ivars);
+        }
+        if (inChunk > 0) {
+            nhfix_diagLogF("hg vals@%s #%d: %s", tag, chunkIndex, chunk.UTF8String);
+        }
+    } @catch (NSException *exception) {
+        nhfix_diagLogF("hg vals@%s failed", tag);
+    }
+}
+
 static NSString *const kNHFixHGClass = @"SBHomeGestureSwitcherModifier";
 static NHFixHookSlot *sNHFixSlotHGBegin;
 static NHFixHookSlot *sNHFixSlotHGEnd;
@@ -478,6 +571,9 @@ static id nhfix_hgBegin(id self, SEL _cmd) {
             layout = nil;
         }
         nhfix_diagLogF("hg begin self=%p dir=%lld layout=%p", self, dirValue, layout);
+        nhfix_hgDumpFieldsOnce(self);
+        sNHFixHGMidDumped = NO;
+        nhfix_hgDumpVals(self, "begin");
     }
     id result = orig ? ((id (*)(id, SEL))orig)(self, _cmd) : nil;
     sNHFixHGInBegin = NO;
@@ -489,6 +585,7 @@ static id nhfix_hgEnd(id self, SEL _cmd) {
     if (logs < 20) {
         logs++;
         nhfix_diagLogF("hg end self=%p", self);
+        nhfix_hgDumpVals(self, "end");
     }
     IMP orig = nhfix_savedIMP(sNHFixSlotHGEnd);
     return orig ? ((id (*)(id, SEL))orig)(self, _cmd) : nil;
@@ -497,6 +594,10 @@ static id nhfix_hgEnd(id self, SEL _cmd) {
 static CGRect nhfix_hgFrame(id self, SEL _cmd, NSUInteger index) {
     IMP orig = nhfix_savedIMP(sNHFixSlotHGFrame);
     CGRect result = orig ? ((CGRect (*)(id, SEL, NSUInteger))orig)(self, _cmd, index) : CGRectZero;
+    if (!sNHFixHGMidDumped) {
+        sNHFixHGMidDumped = YES;
+        nhfix_hgDumpVals(self, "mid");
+    }
     static NSUInteger logs = 0;
     if (logs < 60) {
         logs++;
