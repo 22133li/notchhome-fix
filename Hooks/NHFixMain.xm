@@ -620,16 +620,59 @@ static id nhfix_hgEnd(id self, SEL _cmd) {
     return orig ? ((id (*)(id, SEL))orig)(self, _cmd) : nil;
 }
 
+// Post-release observer (0.5.10): freeze state is kept PER INSTANCE —
+// SpringBoard runs several HG instances whose interleaved queries kept
+// resetting the single shared counter in 0.5.9, so the post window was
+// never detected. Called from both the scale and frame hooks.
+static void nhfix_hgObservePost(id object) {
+    static CFMutableDictionaryRef states = NULL;
+    if (!states) {
+        states = CFDictionaryCreateMutable(NULL, 0, NULL, NULL);
+    }
+    if (CFDictionaryGetCount(states) > 64) {
+        CFDictionaryRemoveAllValues(states);
+    }
+    // state packed in a small malloc'd struct stored as a CF value
+    typedef struct { double lastTs; NSUInteger frozen; BOOL sampled; } NHFixHGState;
+    NHFixHGState *state = (NHFixHGState *)CFDictionaryGetValue(states, (__bridge void *)object);
+    if (!state) {
+        state = (NHFixHGState *)calloc(1, sizeof(NHFixHGState));
+        CFDictionarySetValue(states, (__bridge void *)object, state);
+    }
+    static NSUInteger sEpisodes = 0;
+    char *hgBase = (char *)(__bridge void *)object;
+    double touchTs = *(double *)(hgBase + 400);
+    BOOL gestureEnded = *(BOOL *)(hgBase + 483);
+    if (touchTs != state->lastTs) {
+        state->lastTs = touchTs;
+        state->frozen = 0;
+        state->sampled = NO;
+    } else {
+        state->frozen++;
+        if (state->frozen >= 5 && !state->sampled && sEpisodes < 8) {
+            state->sampled = YES;
+            sEpisodes++;
+            char tag[20];
+            snprintf(tag, sizeof(tag), "post%lu", (unsigned long)sEpisodes);
+            nhfix_hgDumpVals(object, tag);
+            nhfix_hgLogF("hg post-note ep=%lu ended=%d", (unsigned long)sEpisodes, (int)gestureEnded);
+        }
+    }
+}
+
 static CGRect nhfix_hgFrame(id self, SEL _cmd, NSUInteger index) {
     nhfix_hgDumpFieldsOnce(self);
     IMP orig = nhfix_savedIMP(sNHFixSlotHGFrame);
     CGRect result = orig ? ((CGRect (*)(id, SEL, NSUInteger))orig)(self, _cmd, index) : CGRectZero;
+    if (index == 0) {
+        nhfix_hgObservePost(self);
+    }
     if (!sNHFixHGMidDumped) {
         sNHFixHGMidDumped = YES;
         nhfix_hgDumpVals(self, "mid");
     }
     static NSUInteger logs = 0;
-    if (logs < 25) {
+    if (logs < 80) {
         logs++;
         nhfix_diagLogF("hg frame idx=%lu from=(%.0f,%.0f,%.0f,%.0f)",
             (unsigned long)index, CGRectGetMinX(result), CGRectGetMinY(result),
@@ -651,38 +694,10 @@ static double nhfix_hgScale(id self, SEL _cmd, NSUInteger index) {
             snprintf(tag, sizeof(tag), "traj%lu", (unsigned long)trajSamples);
             nhfix_hgDumpVals(self, tag);
         }
-        // Post-release sampling (0.5.9): while the finger is down the
-        // touch timestamp keeps changing; once it has been frozen for
-        // several consecutive geometry queries the system is running
-        // the outcome animation — sample the fields exactly there.
-        // Offsets from the 0.5.8 field dump of this class on iOS 15.4:
-        // _lastTouchTimestamp (double) @400, _gestureHasEnded (BOOL) @483.
-        char *hgBase = (char *)(__bridge void *)self;
-        double touchTs = *(double *)(hgBase + 400);
-        BOOL gestureEnded = *(BOOL *)(hgBase + 483);
-        static double sLastTouchTs = 0;
-        static NSUInteger sFrozenQueries = 0;
-        static BOOL sEpisodeSampled = NO;
-        static NSUInteger sEpisodes = 0;
-        if (touchTs != sLastTouchTs) {
-            sLastTouchTs = touchTs;
-            sFrozenQueries = 0;
-            sEpisodeSampled = NO;
-        } else {
-            sFrozenQueries++;
-            if (sFrozenQueries >= 5 && !sEpisodeSampled && sEpisodes < 6) {
-                sEpisodeSampled = YES;
-                sEpisodes++;
-                char tag[20];
-                snprintf(tag, sizeof(tag), "post%lu", (unsigned long)sEpisodes);
-                nhfix_hgDumpVals(self, tag);
-                nhfix_hgLogF("hg post-note ep=%lu ended=%d scale=%.3f",
-                    (unsigned long)sEpisodes, (int)gestureEnded, result);
-            }
-        }
+        nhfix_hgObservePost(self);
     }
     static NSUInteger logs = 0;
-    if (logs < 25) {
+    if (logs < 80) {
         logs++;
         nhfix_diagLogF("hg scale idx=%lu from=%.3f", (unsigned long)index, result);
     }
