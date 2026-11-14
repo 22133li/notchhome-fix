@@ -6,7 +6,6 @@
 #import "NHFixDiag.h"
 #import "NHFixUtil.h"
 #include <string.h>
-#include <stdlib.h>
 
 // zzNotchHomeFix — companion patch for the ORIGINAL NotchHome 0.5.0
 // (com.tsangbaby.notchhome). The original dylib is left byte-identical
@@ -431,174 +430,121 @@ static id nhfix_hookAnimAttrs(id self, SEL _cmd, id element) {
 }
 
 
-#pragma mark - Discovery (0.5.4 diagnostic: which modifier drives the switcher-entered exit?)
 
-static NSMutableArray<NHFixHookSlot *> *sNHFixDiscoBeginSlots;
-static NSMutableArray<NHFixHookSlot *> *sNHFixDiscoFrameSlots;
-static NSMutableArray<NHFixHookSlot *> *sNHFixDiscoScaleSlots;
+#pragma mark - Dosido single-class probe (0.5.5, log-only)
 
-static NHFixHookSlot *nhfix_discoSlotFor(NSArray<NHFixHookSlot *> *slots, id object) {
-    const char *name = object_getClassName(object);
-    if (!name) {
-        return nil;
+// diag_7 salvage: at the moment the user exited an app, the
+// SBCrossblurDosidoSwitcherModifier showed transition activity,
+// while the icon-zoom modifier (the only class the original hooks)
+// never begins for a switcher-entered app's exit (diag_6). The
+// 0.5.4 broad discovery build crashed SpringBoard (shared-IMP
+// double hooks across many modifier classes), so this probe hooks
+// THIS ONE class only, log-only, with a reentrancy guard on the
+// begin hook. Goal: confirm whether the switcher-entered exit runs
+// through Dosido, and what geometry it serves if it has any.
+
+static NSString *const kNHFixDosidoClass = @"SBCrossblurDosidoSwitcherModifier";
+static NHFixHookSlot *sNHFixSlotDosBegin;
+static NHFixHookSlot *sNHFixSlotDosEnd;
+static NHFixHookSlot *sNHFixSlotDosFrame;
+static NHFixHookSlot *sNHFixSlotDosScale;
+static BOOL sNHFixDosInBegin = NO;
+
+static id nhfix_dosBegin(id self, SEL _cmd) {
+    IMP orig = nhfix_savedIMP(sNHFixSlotDosBegin);
+    if (sNHFixDosInBegin) {
+        return orig ? ((id (*)(id, SEL))orig)(self, _cmd) : nil;
     }
-    NSString *className = [NSString stringWithUTF8String:name];
-    for (NHFixHookSlot *slot in slots) {
-        if ([slot.className isEqualToString:className]) {
-            return slot;
+    sNHFixDosInBegin = YES;
+    static NSUInteger logs = 0;
+    if (logs < 20) {
+        logs++;
+        long long dirValue = -9;
+        @try {
+            id dirObj = [self valueForKey:@"direction"];
+            if ([dirObj isKindOfClass:[NSNumber class]]) {
+                dirValue = [dirObj longLongValue];
+            }
+        } @catch (NSException *exception) {
+            dirValue = -8;
         }
+        id layout = nil;
+        @try {
+            layout = [self valueForKey:@"appLayout"];
+        } @catch (NSException *exception) {
+            layout = nil;
+        }
+        nhfix_diagLogF("dos begin self=%p dir=%lld layout=%p", self, dirValue, layout);
     }
-    return nil;
+    id result = orig ? ((id (*)(id, SEL))orig)(self, _cmd) : nil;
+    sNHFixDosInBegin = NO;
+    return result;
 }
 
-static id nhfix_discoWillBegin(id self, SEL _cmd) {
+static id nhfix_dosEnd(id self, SEL _cmd) {
     static NSUInteger logs = 0;
-    if (logs < 80) {
+    if (logs < 20) {
         logs++;
-        nhfix_diagLogF("disco begin class=%s self=%p", object_getClassName(self), self);
+        nhfix_diagLogF("dos end self=%p", self);
     }
-    IMP orig = nhfix_savedIMP(nhfix_discoSlotFor(sNHFixDiscoBeginSlots, self));
+    IMP orig = nhfix_savedIMP(sNHFixSlotDosEnd);
     return orig ? ((id (*)(id, SEL))orig)(self, _cmd) : nil;
 }
 
-static CGRect nhfix_discoFrame(id self, SEL _cmd, NSUInteger index) {
-    IMP orig = nhfix_savedIMP(nhfix_discoSlotFor(sNHFixDiscoFrameSlots, self));
+static CGRect nhfix_dosFrame(id self, SEL _cmd, NSUInteger index) {
+    IMP orig = nhfix_savedIMP(sNHFixSlotDosFrame);
     CGRect result = orig ? ((CGRect (*)(id, SEL, NSUInteger))orig)(self, _cmd, index) : CGRectZero;
     static NSUInteger logs = 0;
-    if (logs < 80) {
+    if (logs < 30) {
         logs++;
-        nhfix_diagLogF("disco frame class=%s idx=%lu from=(%.0f,%.0f,%.0f,%.0f)",
-            object_getClassName(self), (unsigned long)index,
-            CGRectGetMinX(result), CGRectGetMinY(result),
+        nhfix_diagLogF("dos frame idx=%lu from=(%.0f,%.0f,%.0f,%.0f)",
+            (unsigned long)index, CGRectGetMinX(result), CGRectGetMinY(result),
             CGRectGetWidth(result), CGRectGetHeight(result));
     }
     return result;
 }
 
-static double nhfix_discoScale(id self, SEL _cmd, NSUInteger index) {
-    IMP orig = nhfix_savedIMP(nhfix_discoSlotFor(sNHFixDiscoScaleSlots, self));
+static double nhfix_dosScale(id self, SEL _cmd, NSUInteger index) {
+    IMP orig = nhfix_savedIMP(sNHFixSlotDosScale);
     double result = orig ? ((double (*)(id, SEL, NSUInteger))orig)(self, _cmd, index) : 1.0;
     static NSUInteger logs = 0;
-    if (logs < 80) {
+    if (logs < 30) {
         logs++;
-        nhfix_diagLogF("disco scale class=%s idx=%lu from=%.3f",
-            object_getClassName(self), (unsigned long)index, result);
+        nhfix_diagLogF("dos scale idx=%lu from=%.3f", (unsigned long)index, result);
     }
     return result;
 }
 
-static BOOL nhfix_isSubclassOf(Class cls, Class base) {
-    for (Class c = cls; c; c = class_getSuperclass(c)) {
-        if (c == base) {
-            return YES;
-        }
+static void nhfix_dosidoInstall(void) {
+    nhfix_slot(&sNHFixSlotDosBegin, kNHFixDosidoClass, @"transitionWillBegin");
+    if (![sNHFixSlotDosBegin nhfix_installWithReplacement:(IMP)nhfix_dosBegin
+                                               returnType:"@" argumentTypes:@[]]) {
+        [sNHFixSlotDosBegin nhfix_installWithReplacement:(IMP)nhfix_dosBegin
+                                              returnType:"v" argumentTypes:@[]];
     }
-    return NO;
-}
-
-static BOOL nhfix_ownsMethod(Class cls, SEL selector, Class base) {
-    Method method = class_getInstanceMethod(cls, selector);
-    if (!method) {
-        return NO;
+    nhfix_slot(&sNHFixSlotDosEnd, kNHFixDosidoClass, @"transitionDidEnd");
+    if (![sNHFixSlotDosEnd nhfix_installWithReplacement:(IMP)nhfix_dosEnd
+                                             returnType:"@" argumentTypes:@[]]) {
+        [sNHFixSlotDosEnd nhfix_installWithReplacement:(IMP)nhfix_dosEnd
+                                            returnType:"v" argumentTypes:@[]];
     }
-    if (!base) {
-        return YES;
-    }
-    Method baseMethod = class_getInstanceMethod(base, selector);
-    if (!baseMethod) {
-        return YES;
-    }
-    return method_getImplementation(method) != method_getImplementation(baseMethod);
-}
-
-static BOOL nhfix_discoAlreadyHooked(NSArray<NHFixHookSlot *> *slots, NSString *className) {
-    for (NHFixHookSlot *slot in slots) {
-        if ([slot.className isEqualToString:className]) {
-            return YES;
-        }
-    }
-    return NO;
-}
-
-static void nhfix_discoveryInstall(void) {
-    if (!sNHFixDiscoBeginSlots) {
-        sNHFixDiscoBeginSlots = [NSMutableArray array];
-        sNHFixDiscoFrameSlots = [NSMutableArray array];
-        sNHFixDiscoScaleSlots = [NSMutableArray array];
-    }
-    Class base = NSClassFromString(@"SBSwitcherModifier");
-    SEL beginSel = NSSelectorFromString(@"transitionWillBegin");
-    SEL frameSel = NSSelectorFromString(@"frameForIndex:");
-    SEL scaleSel = NSSelectorFromString(@"scaleForIndex:");
-    unsigned int count = 0;
-    Class *classes = objc_copyClassList(&count);
-    NSMutableString *hooked = [NSMutableString string];
-    for (unsigned int i = 0; i < count; i++) {
-        Class cls = classes[i];
-        const char *name = class_getName(cls);
-        if (!name || !strstr(name, "SwitcherModifier")) {
-            continue;
-        }
-        if (base && !nhfix_isSubclassOf(cls, base)) {
-            continue;
-        }
-        NSString *className = [NSString stringWithUTF8String:name];
-        if ([className isEqualToString:kNHFixModifierClass] ||
-            [className isEqualToString:kNHFixGestureModifierClass]) {
-            continue;
-        }
-        if (nhfix_ownsMethod(cls, beginSel, base) &&
-            !nhfix_discoAlreadyHooked(sNHFixDiscoBeginSlots, className)) {
-            NHFixHookSlot *slot = [NHFixHookSlot nhfix_slotWithClassName:className
-                                                           selectorName:@"transitionWillBegin"];
-            BOOL ok = [slot nhfix_installWithReplacement:(IMP)nhfix_discoWillBegin
-                                              returnType:"@" argumentTypes:@[]];
-            if (!ok) {
-                ok = [slot nhfix_installWithReplacement:(IMP)nhfix_discoWillBegin
-                                             returnType:"v" argumentTypes:@[]];
-            }
-            if (ok) {
-                [sNHFixDiscoBeginSlots addObject:slot];
-                [hooked appendFormat:@"%s(begin) ", name];
-            }
-        }
-        if (nhfix_ownsMethod(cls, frameSel, base) &&
-            !nhfix_discoAlreadyHooked(sNHFixDiscoFrameSlots, className)) {
-            NHFixHookSlot *slot = [NHFixHookSlot nhfix_slotWithClassName:className
-                                                           selectorName:@"frameForIndex:"];
-            BOOL ok = [slot nhfix_installWithReplacement:(IMP)nhfix_discoFrame
+    nhfix_slot(&sNHFixSlotDosFrame, kNHFixDosidoClass, @"frameForIndex:");
+    if (![sNHFixSlotDosFrame nhfix_installWithReplacement:(IMP)nhfix_dosFrame
+                                               returnType:kNHFixCGRectEncoding
+                                            argumentTypes:@[@"Q"]]) {
+        [sNHFixSlotDosFrame nhfix_installWithReplacement:(IMP)nhfix_dosFrame
                                               returnType:kNHFixCGRectEncoding
-                                           argumentTypes:@[@"Q"]];
-            if (!ok) {
-                ok = [slot nhfix_installWithReplacement:(IMP)nhfix_discoFrame
-                                             returnType:kNHFixCGRectEncoding
-                                          argumentTypes:@[@"I"]];
-            }
-            if (ok) {
-                [sNHFixDiscoFrameSlots addObject:slot];
-                [hooked appendFormat:@"%s(frame) ", name];
-            }
-        }
-        if (nhfix_ownsMethod(cls, scaleSel, base) &&
-            !nhfix_discoAlreadyHooked(sNHFixDiscoScaleSlots, className)) {
-            NHFixHookSlot *slot = [NHFixHookSlot nhfix_slotWithClassName:className
-                                                           selectorName:@"scaleForIndex:"];
-            BOOL ok = [slot nhfix_installWithReplacement:(IMP)nhfix_discoScale
-                                              returnType:"d" argumentTypes:@[@"Q"]];
-            if (!ok) {
-                ok = [slot nhfix_installWithReplacement:(IMP)nhfix_discoScale
-                                             returnType:"d" argumentTypes:@[@"I"]];
-            }
-            if (ok) {
-                [sNHFixDiscoScaleSlots addObject:slot];
-                [hooked appendFormat:@"%s(scale) ", name];
-            }
-        }
+                                           argumentTypes:@[@"I"]];
     }
-    free(classes);
-    if (hooked.length > 0) {
-        nhfix_diagLogF("disco hooked: %s", hooked.UTF8String);
+    nhfix_slot(&sNHFixSlotDosScale, kNHFixDosidoClass, @"scaleForIndex:");
+    if (![sNHFixSlotDosScale nhfix_installWithReplacement:(IMP)nhfix_dosScale
+                                               returnType:"d" argumentTypes:@[@"Q"]]) {
+        [sNHFixSlotDosScale nhfix_installWithReplacement:(IMP)nhfix_dosScale
+                                              returnType:"d" argumentTypes:@[@"I"]];
     }
+    nhfix_diagLogF("dos installs: begin=%d end=%d frame=%d scale=%d",
+        (int)sNHFixSlotDosBegin.installed, (int)sNHFixSlotDosEnd.installed,
+        (int)sNHFixSlotDosFrame.installed, (int)sNHFixSlotDosScale.installed);
 }
 
 #pragma mark - Installation
@@ -659,7 +605,7 @@ static void nhfix_installAll(void) {
     [sNHFixSlotAnimAttrs nhfix_installWithReplacement:(IMP)nhfix_hookAnimAttrs
                                            returnType:"@" argumentTypes:@[@"@"]];
 
-    nhfix_discoveryInstall();
+    nhfix_dosidoInstall();
 
     nhfix_diagLogF("fix installs: begin=%d end=%d int=%d frame=%d scale=%d corner=%d anim=%d",
         (int)sNHFixSlotWillBegin.installed, (int)sNHFixSlotDidEnd.installed,
