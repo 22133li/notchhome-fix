@@ -1,0 +1,9 @@
+Package: com.tsangbaby.notchhomefix
+Name: zzNotchHomeFix
+Version: 0.5.1
+Architecture: iphoneos-arm
+Description: Companion patch for NotchHome 0.5.0: supplements the closing legs the original misses (folder app re-entered from the switcher). Requires the original NotchHome dylib, which ships in the combined 0.5.1 package.
+Maintainer: Axs
+Author: Axs
+Section: Tweaks
+Depends: mobilesubstrate
