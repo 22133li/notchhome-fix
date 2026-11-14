@@ -431,7 +431,7 @@ static id nhfix_hookAnimAttrs(id self, SEL _cmd, id element) {
 
 
 
-static NHFixHookSlot *nhfix_slot(NHFixHookSlot **slot,
+static NHFixHookSlot *nhfix_slot(NHFixHookSlot *__strong *slot,
                                  NSString *className, NSString *selectorName);
 
 #pragma mark - Dosido single-class probe (0.5.5, log-only)
