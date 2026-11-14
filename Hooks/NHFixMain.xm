@@ -505,7 +505,11 @@ static void nhfix_hgDumpFieldsOnce(id object) {
     }
 }
 
+static void nhfix_dumpValsAs(id object, const char *tag, const char *prefix);
 static void nhfix_hgDumpVals(id object, const char *tag) {
+    nhfix_dumpValsAs(object, tag, "hg");
+}
+static void nhfix_dumpValsAs(id object, const char *tag, const char *prefix) {
     if (!object) {
         return;
     }
@@ -553,7 +557,7 @@ static void nhfix_hgDumpVals(id object, const char *tag) {
                 [chunk appendFormat:@"%s=%s ", name ? name : "?", value];
                 inChunk++;
                 if (inChunk >= 8) {
-                    nhfix_hgLogF("hg vals@%s #%d: %s", tag, chunkIndex++, chunk.UTF8String);
+                    nhfix_hgLogF("%s vals@%s #%d: %s", prefix, tag, chunkIndex++, chunk.UTF8String);
                     [chunk setString:@""];
                     inChunk = 0;
                 }
@@ -561,10 +565,10 @@ static void nhfix_hgDumpVals(id object, const char *tag) {
             free(ivars);
         }
         if (inChunk > 0) {
-            nhfix_hgLogF("hg vals@%s #%d: %s", tag, chunkIndex, chunk.UTF8String);
+            nhfix_hgLogF("%s vals@%s #%d: %s", prefix, tag, chunkIndex, chunk.UTF8String);
         }
     } @catch (NSException *exception) {
-        nhfix_hgLogF("hg vals@%s failed", tag);
+        nhfix_hgLogF("%s vals@%s failed", prefix, tag);
     }
 }
 
@@ -624,6 +628,42 @@ static id nhfix_hgEnd(id self, SEL _cmd) {
 // SpringBoard runs several HG instances whose interleaved queries kept
 // resetting the single shared counter in 0.5.9, so the post window was
 // never detected. Called from both the scale and frame hooks.
+// FinalDestination child probe (0.5.11): HG's own scalars carry no
+// destination (proven 0.5.10); its child _finalDestinationModifier
+// is the named owner of the outcome. Dump its field table once per
+// child instance and sample its scalars wherever HG is sampled.
+static void *sNHFixFDLastChild = NULL;
+
+static void nhfix_fdDumpFieldsOnce(id child) {
+    if (!child || (void *)child == sNHFixFDLastChild) {
+        return;
+    }
+    sNHFixFDLastChild = (void *)child;
+    Class stop = NSClassFromString(@"NSObject");
+    for (Class cls = object_getClass(child); cls && cls != stop; cls = class_getSuperclass(cls)) {
+        unsigned int count = 0;
+        Ivar *ivars = class_copyIvarList(cls, &count);
+        for (unsigned int i = 0; i < count; i++) {
+            const char *name = ivar_getName(ivars[i]);
+            const char *enc = ivar_getTypeEncoding(ivars[i]);
+            nhfix_hgLogF("hgfd field %s %s %s @%td",
+                class_getName(cls), name ? name : "?", enc ? enc : "?",
+                ivar_getOffset(ivars[i]));
+        }
+        free(ivars);
+    }
+}
+
+static void nhfix_hgDumpBoth(id hg, const char *tag) {
+    nhfix_hgDumpVals(hg, tag);
+    Ivar iv = class_getInstanceVariable(object_getClass(hg), "_finalDestinationModifier");
+    id child = iv ? object_getIvar(hg, iv) : nil;
+    if (child) {
+        nhfix_fdDumpFieldsOnce(child);
+        nhfix_dumpValsAs(child, tag, "hgfd");
+    }
+}
+
 static void nhfix_hgObservePost(id object) {
     static CFMutableDictionaryRef states = NULL;
     if (!states) {
@@ -654,7 +694,7 @@ static void nhfix_hgObservePost(id object) {
             sEpisodes++;
             char tag[20];
             snprintf(tag, sizeof(tag), "post%lu", (unsigned long)sEpisodes);
-            nhfix_hgDumpVals(object, tag);
+            nhfix_hgDumpBoth(object, tag);
             nhfix_hgLogF("hg post-note ep=%lu ended=%d", (unsigned long)sEpisodes, (int)gestureEnded);
         }
     }
@@ -669,7 +709,7 @@ static CGRect nhfix_hgFrame(id self, SEL _cmd, NSUInteger index) {
     }
     if (!sNHFixHGMidDumped) {
         sNHFixHGMidDumped = YES;
-        nhfix_hgDumpVals(self, "mid");
+        nhfix_hgDumpBoth(self, "mid");
     }
     static NSUInteger logs = 0;
     if (logs < 80) {
@@ -692,7 +732,7 @@ static double nhfix_hgScale(id self, SEL _cmd, NSUInteger index) {
             trajSamples++;
             char tag[16];
             snprintf(tag, sizeof(tag), "traj%lu", (unsigned long)trajSamples);
-            nhfix_hgDumpVals(self, tag);
+            nhfix_hgDumpBoth(self, tag);
         }
         nhfix_hgObservePost(self);
     }
