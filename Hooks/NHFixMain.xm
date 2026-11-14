@@ -489,6 +489,55 @@ static void nhfix_hgLogF(const char *format, ...) {
 // begin, at the first geometry query of the leg, and at end. A
 // committed-home exit vs these snapshots should expose the field
 // that carries the destination/commit state.
+
+static NSString *const kNHFixHGClass = @"SBHomeGestureSwitcherModifier";
+static NHFixHookSlot *sNHFixSlotHGBegin;
+static NHFixHookSlot *sNHFixSlotHGEnd;
+static NHFixHookSlot *sNHFixSlotHGFrame;
+static NHFixHookSlot *sNHFixSlotHGScale;
+static BOOL sNHFixHGInBegin = NO;
+
+static id nhfix_hgBegin(id self, SEL _cmd) {
+    IMP orig = nhfix_savedIMP(sNHFixSlotHGBegin);
+    if (sNHFixHGInBegin) {
+        return orig ? ((id (*)(id, SEL))orig)(self, _cmd) : nil;
+    }
+    sNHFixHGInBegin = YES;
+    static NSUInteger logs = 0;
+    if (logs < 20) {
+        logs++;
+        long long dirValue = -9;
+        @try {
+            id dirObj = [self valueForKey:@"direction"];
+            if ([dirObj isKindOfClass:[NSNumber class]]) {
+                dirValue = [dirObj longLongValue];
+            }
+        } @catch (NSException *exception) {
+            dirValue = -8;
+        }
+        id layout = nil;
+        @try {
+            layout = [self valueForKey:@"appLayout"];
+        } @catch (NSException *exception) {
+            layout = nil;
+        }
+        nhfix_diagLogF("hg begin self=%p dir=%lld layout=%p", self, dirValue, layout);
+    }
+    id result = orig ? ((id (*)(id, SEL))orig)(self, _cmd) : nil;
+    sNHFixHGInBegin = NO;
+    return result;
+}
+
+static id nhfix_hgEnd(id self, SEL _cmd) {
+    static NSUInteger logs = 0;
+    if (logs < 20) {
+        logs++;
+        nhfix_diagLogF("hg end self=%p", self);
+    }
+    IMP orig = nhfix_savedIMP(sNHFixSlotHGEnd);
+    return orig ? ((id (*)(id, SEL))orig)(self, _cmd) : nil;
+}
+
 // Destination change-edge logger (0.5.12): _lastFinalDestination
 // (double @240 on the FD child) moved live in the 0.5.11 samples
 // (0 -> 4 -> 3 during one gesture). Log every change of the value
