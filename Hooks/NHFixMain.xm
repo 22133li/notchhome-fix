@@ -434,31 +434,31 @@ static id nhfix_hookAnimAttrs(id self, SEL _cmd, id element) {
 static NHFixHookSlot *nhfix_slot(NHFixHookSlot *__strong *slot,
                                  NSString *className, NSString *selectorName);
 
-#pragma mark - Dosido single-class probe (0.5.5, log-only)
+#pragma mark - HomeGesture single-class probe (0.5.6, log-only)
 
-// diag_7 salvage: at the moment the user exited an app, the
-// SBCrossblurDosidoSwitcherModifier showed transition activity,
-// while the icon-zoom modifier (the only class the original hooks)
-// never begins for a switcher-entered app's exit (diag_6). The
-// 0.5.4 broad discovery build crashed SpringBoard (shared-IMP
-// double hooks across many modifier classes), so this probe hooks
-// THIS ONE class only, log-only, with a reentrancy guard on the
-// begin hook. Goal: confirm whether the switcher-entered exit runs
-// through Dosido, and what geometry it serves if it has any.
+// The Dosido probe (0.5.5, diag_8) installed cleanly but recorded
+// ZERO calls during the target exit — Dosido is not the path. The
+// exit is digested inside the switcher gesture chain; the one
+// class with device evidence of streaming geometry for the apps
+// during gestures is SBHomeGestureSwitcherModifier (diag_7 disco
+// lines: its frame/scale for the app indices track the gesture).
+// This probe hooks THIS ONE class only, log-only, reentrancy
+// guard on begin. Goal: see the frame/scale it serves for the
+// exiting app during a switcher-entered exit.
 
-static NSString *const kNHFixDosidoClass = @"SBCrossblurDosidoSwitcherModifier";
-static NHFixHookSlot *sNHFixSlotDosBegin;
-static NHFixHookSlot *sNHFixSlotDosEnd;
-static NHFixHookSlot *sNHFixSlotDosFrame;
-static NHFixHookSlot *sNHFixSlotDosScale;
-static BOOL sNHFixDosInBegin = NO;
+static NSString *const kNHFixHGClass = @"SBHomeGestureSwitcherModifier";
+static NHFixHookSlot *sNHFixSlotHGBegin;
+static NHFixHookSlot *sNHFixSlotHGEnd;
+static NHFixHookSlot *sNHFixSlotHGFrame;
+static NHFixHookSlot *sNHFixSlotHGScale;
+static BOOL sNHFixHGInBegin = NO;
 
-static id nhfix_dosBegin(id self, SEL _cmd) {
-    IMP orig = nhfix_savedIMP(sNHFixSlotDosBegin);
-    if (sNHFixDosInBegin) {
+static id nhfix_hgBegin(id self, SEL _cmd) {
+    IMP orig = nhfix_savedIMP(sNHFixSlotHGBegin);
+    if (sNHFixHGInBegin) {
         return orig ? ((id (*)(id, SEL))orig)(self, _cmd) : nil;
     }
-    sNHFixDosInBegin = YES;
+    sNHFixHGInBegin = YES;
     static NSUInteger logs = 0;
     if (logs < 20) {
         logs++;
@@ -477,77 +477,77 @@ static id nhfix_dosBegin(id self, SEL _cmd) {
         } @catch (NSException *exception) {
             layout = nil;
         }
-        nhfix_diagLogF("dos begin self=%p dir=%lld layout=%p", self, dirValue, layout);
+        nhfix_diagLogF("hg begin self=%p dir=%lld layout=%p", self, dirValue, layout);
     }
     id result = orig ? ((id (*)(id, SEL))orig)(self, _cmd) : nil;
-    sNHFixDosInBegin = NO;
+    sNHFixHGInBegin = NO;
     return result;
 }
 
-static id nhfix_dosEnd(id self, SEL _cmd) {
+static id nhfix_hgEnd(id self, SEL _cmd) {
     static NSUInteger logs = 0;
     if (logs < 20) {
         logs++;
-        nhfix_diagLogF("dos end self=%p", self);
+        nhfix_diagLogF("hg end self=%p", self);
     }
-    IMP orig = nhfix_savedIMP(sNHFixSlotDosEnd);
+    IMP orig = nhfix_savedIMP(sNHFixSlotHGEnd);
     return orig ? ((id (*)(id, SEL))orig)(self, _cmd) : nil;
 }
 
-static CGRect nhfix_dosFrame(id self, SEL _cmd, NSUInteger index) {
-    IMP orig = nhfix_savedIMP(sNHFixSlotDosFrame);
+static CGRect nhfix_hgFrame(id self, SEL _cmd, NSUInteger index) {
+    IMP orig = nhfix_savedIMP(sNHFixSlotHGFrame);
     CGRect result = orig ? ((CGRect (*)(id, SEL, NSUInteger))orig)(self, _cmd, index) : CGRectZero;
     static NSUInteger logs = 0;
-    if (logs < 30) {
+    if (logs < 60) {
         logs++;
-        nhfix_diagLogF("dos frame idx=%lu from=(%.0f,%.0f,%.0f,%.0f)",
+        nhfix_diagLogF("hg frame idx=%lu from=(%.0f,%.0f,%.0f,%.0f)",
             (unsigned long)index, CGRectGetMinX(result), CGRectGetMinY(result),
             CGRectGetWidth(result), CGRectGetHeight(result));
     }
     return result;
 }
 
-static double nhfix_dosScale(id self, SEL _cmd, NSUInteger index) {
-    IMP orig = nhfix_savedIMP(sNHFixSlotDosScale);
+static double nhfix_hgScale(id self, SEL _cmd, NSUInteger index) {
+    IMP orig = nhfix_savedIMP(sNHFixSlotHGScale);
     double result = orig ? ((double (*)(id, SEL, NSUInteger))orig)(self, _cmd, index) : 1.0;
     static NSUInteger logs = 0;
-    if (logs < 30) {
+    if (logs < 60) {
         logs++;
-        nhfix_diagLogF("dos scale idx=%lu from=%.3f", (unsigned long)index, result);
+        nhfix_diagLogF("hg scale idx=%lu from=%.3f", (unsigned long)index, result);
     }
     return result;
 }
 
-static void nhfix_dosidoInstall(void) {
-    nhfix_slot(&sNHFixSlotDosBegin, kNHFixDosidoClass, @"transitionWillBegin");
-    if (![sNHFixSlotDosBegin nhfix_installWithReplacement:(IMP)nhfix_dosBegin
+static void nhfix_hgInstall(void) {
+    nhfix_slot(&sNHFixSlotHGBegin, kNHFixHGClass, @"transitionWillBegin");
+    if (![sNHFixSlotHGBegin nhfix_installWithReplacement:(IMP)nhfix_hgBegin
                                                returnType:"@" argumentTypes:@[]]) {
-        [sNHFixSlotDosBegin nhfix_installWithReplacement:(IMP)nhfix_dosBegin
+        [sNHFixSlotHGBegin nhfix_installWithReplacement:(IMP)nhfix_hgBegin
                                               returnType:"v" argumentTypes:@[]];
     }
-    nhfix_slot(&sNHFixSlotDosEnd, kNHFixDosidoClass, @"transitionDidEnd");
-    if (![sNHFixSlotDosEnd nhfix_installWithReplacement:(IMP)nhfix_dosEnd
+    nhfix_slot(&sNHFixSlotHGEnd, kNHFixHGClass, @"transitionDidEnd");
+    if (![sNHFixSlotHGEnd nhfix_installWithReplacement:(IMP)nhfix_hgEnd
                                              returnType:"@" argumentTypes:@[]]) {
-        [sNHFixSlotDosEnd nhfix_installWithReplacement:(IMP)nhfix_dosEnd
+        [sNHFixSlotHGEnd nhfix_installWithReplacement:(IMP)nhfix_hgEnd
                                             returnType:"v" argumentTypes:@[]];
     }
-    nhfix_slot(&sNHFixSlotDosFrame, kNHFixDosidoClass, @"frameForIndex:");
-    if (![sNHFixSlotDosFrame nhfix_installWithReplacement:(IMP)nhfix_dosFrame
+    nhfix_slot(&sNHFixSlotHGFrame, kNHFixHGClass, @"frameForIndex:");
+    if (![sNHFixSlotHGFrame nhfix_installWithReplacement:(IMP)nhfix_hgFrame
                                                returnType:kNHFixCGRectEncoding
                                             argumentTypes:@[@"Q"]]) {
-        [sNHFixSlotDosFrame nhfix_installWithReplacement:(IMP)nhfix_dosFrame
+        [sNHFixSlotHGFrame nhfix_installWithReplacement:(IMP)nhfix_hgFrame
                                               returnType:kNHFixCGRectEncoding
                                            argumentTypes:@[@"I"]];
     }
-    nhfix_slot(&sNHFixSlotDosScale, kNHFixDosidoClass, @"scaleForIndex:");
-    if (![sNHFixSlotDosScale nhfix_installWithReplacement:(IMP)nhfix_dosScale
+    nhfix_slot(&sNHFixSlotHGScale, kNHFixHGClass, @"scaleForIndex:");
+    if (![sNHFixSlotHGScale nhfix_installWithReplacement:(IMP)nhfix_hgScale
                                                returnType:"d" argumentTypes:@[@"Q"]]) {
-        [sNHFixSlotDosScale nhfix_installWithReplacement:(IMP)nhfix_dosScale
+        [sNHFixSlotHGScale nhfix_installWithReplacement:(IMP)nhfix_hgScale
                                               returnType:"d" argumentTypes:@[@"I"]];
     }
-    nhfix_diagLogF("dos installs: begin=%d end=%d frame=%d scale=%d",
-        (int)sNHFixSlotDosBegin.installed, (int)sNHFixSlotDosEnd.installed,
-        (int)sNHFixSlotDosFrame.installed, (int)sNHFixSlotDosScale.installed);
+    nhfix_diagLogF("hg installs: begin=%d end=%d frame=%d scale=%d",
+        (int)sNHFixSlotHGBegin.installed, (int)sNHFixSlotHGEnd.installed,
+        (int)sNHFixSlotHGFrame.installed, (int)sNHFixSlotHGScale.installed);
 }
 
 #pragma mark - Installation
@@ -608,7 +608,7 @@ static void nhfix_installAll(void) {
     [sNHFixSlotAnimAttrs nhfix_installWithReplacement:(IMP)nhfix_hookAnimAttrs
                                            returnType:"@" argumentTypes:@[@"@"]];
 
-    nhfix_dosidoInstall();
+    nhfix_hgInstall();
 
     nhfix_diagLogF("fix installs: begin=%d end=%d int=%d frame=%d scale=%d corner=%d anim=%d",
         (int)sNHFixSlotWillBegin.installed, (int)sNHFixSlotDidEnd.installed,
