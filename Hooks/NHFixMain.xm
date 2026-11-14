@@ -664,6 +664,57 @@ static void nhfix_hgDumpBoth(id hg, const char *tag) {
     }
 }
 
+// Destination change-edge logger (0.5.12): _lastFinalDestination
+// (double @240 on the FD child) moved live in the 0.5.11 samples
+// (0 -> 4 -> 3 during one gesture). Log every change of the value
+// and of _finalDestinationReason so a test with known outcomes
+// maps the enum directly. Offsets/ivars resolved by name, cached.
+static void nhfix_fdObserveDestination(id hg) {
+    static Ivar sFDIvar = NULL;
+    static Ivar sDestIvar = NULL;
+    static Ivar sReasonIvar = NULL;
+    if (!sFDIvar) {
+        sFDIvar = class_getInstanceVariable(object_getClass(hg), "_finalDestinationModifier");
+        if (!sFDIvar) {
+            return;
+        }
+    }
+    id child = object_getIvar(hg, sFDIvar);
+    if (!child) {
+        return;
+    }
+    Class childClass = object_getClass(child);
+    if (!sDestIvar) {
+        sDestIvar = class_getInstanceVariable(childClass, "_lastFinalDestination");
+        sReasonIvar = class_getInstanceVariable(childClass, "_finalDestinationReason");
+        if (!sDestIvar) {
+            return;
+        }
+    }
+    char *childBase = (char *)(__bridge void *)child;
+    double dest = *(double *)(childBase + ivar_getOffset(sDestIvar));
+    NSString *reason = nil;
+    if (sReasonIvar) {
+        @try {
+            reason = object_getIvar(child, sReasonIvar);
+        } @catch (NSException *exception) {
+            reason = nil;
+        }
+    }
+    static double sLastDest = -1;
+    static void *sLastChild = NULL;
+    static NSString *sLastReason = nil;
+    BOOL changed = ((__bridge void *)child != sLastChild) || dest != sLastDest ||
+        (reason != sLastReason && ![reason isEqualToString:sLastReason]);
+    if (changed) {
+        sLastChild = (__bridge void *)child;
+        sLastDest = dest;
+        sLastReason = reason;
+        nhfix_hgLogF("hgfd dest=%.0f reason=%s child=%p",
+            dest, reason ? reason.UTF8String : "(nil)", child);
+    }
+}
+
 static void nhfix_hgObservePost(id object) {
     static CFMutableDictionaryRef states = NULL;
     if (!states) {
@@ -705,6 +756,7 @@ static CGRect nhfix_hgFrame(id self, SEL _cmd, NSUInteger index) {
     IMP orig = nhfix_savedIMP(sNHFixSlotHGFrame);
     CGRect result = orig ? ((CGRect (*)(id, SEL, NSUInteger))orig)(self, _cmd, index) : CGRectZero;
     if (index == 0) {
+        nhfix_fdObserveDestination(self);
         nhfix_hgObservePost(self);
     }
     if (!sNHFixHGMidDumped) {
@@ -734,6 +786,7 @@ static double nhfix_hgScale(id self, SEL _cmd, NSUInteger index) {
             snprintf(tag, sizeof(tag), "traj%lu", (unsigned long)trajSamples);
             nhfix_hgDumpBoth(self, tag);
         }
+        nhfix_fdObserveDestination(self);
         nhfix_hgObservePost(self);
     }
     static NSUInteger logs = 0;
