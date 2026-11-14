@@ -500,7 +500,7 @@ static void nhfix_hgDumpVals(id object, const char *tag) {
                     continue;
                 }
                 const char *name = ivar_getName(ivars[i]);
-                char *base = (char *)object + ivar_getOffset(ivars[i]);
+                char *base = (char *)(__bridge void *)object + ivar_getOffset(ivars[i]);
                 char value[64];
                 if (kind == 'f') {
                     snprintf(value, sizeof(value), "%.3f", (double)*(float *)base);
