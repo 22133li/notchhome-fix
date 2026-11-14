@@ -645,11 +645,40 @@ static double nhfix_hgScale(id self, SEL _cmd, NSUInteger index) {
         static NSUInteger idx0Queries = 0;
         static NSUInteger trajSamples = 0;
         idx0Queries++;
-        if ((idx0Queries % 20) == 0 && trajSamples < 14) {
+        if ((idx0Queries % 20) == 0 && trajSamples < 30) {
             trajSamples++;
             char tag[16];
             snprintf(tag, sizeof(tag), "traj%lu", (unsigned long)trajSamples);
             nhfix_hgDumpVals(self, tag);
+        }
+        // Post-release sampling (0.5.9): while the finger is down the
+        // touch timestamp keeps changing; once it has been frozen for
+        // several consecutive geometry queries the system is running
+        // the outcome animation — sample the fields exactly there.
+        // Offsets from the 0.5.8 field dump of this class on iOS 15.4:
+        // _lastTouchTimestamp (double) @400, _gestureHasEnded (BOOL) @483.
+        char *hgBase = (char *)(__bridge void *)self;
+        double touchTs = *(double *)(hgBase + 400);
+        BOOL gestureEnded = *(BOOL *)(hgBase + 483);
+        static double sLastTouchTs = 0;
+        static NSUInteger sFrozenQueries = 0;
+        static BOOL sEpisodeSampled = NO;
+        static NSUInteger sEpisodes = 0;
+        if (touchTs != sLastTouchTs) {
+            sLastTouchTs = touchTs;
+            sFrozenQueries = 0;
+            sEpisodeSampled = NO;
+        } else {
+            sFrozenQueries++;
+            if (sFrozenQueries >= 5 && !sEpisodeSampled && sEpisodes < 6) {
+                sEpisodeSampled = YES;
+                sEpisodes++;
+                char tag[20];
+                snprintf(tag, sizeof(tag), "post%lu", (unsigned long)sEpisodes);
+                nhfix_hgDumpVals(self, tag);
+                nhfix_hgLogF("hg post-note ep=%lu ended=%d scale=%.3f",
+                    (unsigned long)sEpisodes, (int)gestureEnded, result);
+            }
         }
     }
     static NSUInteger logs = 0;
