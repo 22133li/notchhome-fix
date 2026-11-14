@@ -6,6 +6,7 @@
 #import "NHFixDiag.h"
 #import "NHFixUtil.h"
 #include <string.h>
+#include <stdarg.h>
 
 // zzNotchHomeFix — companion patch for the ORIGINAL NotchHome 0.5.0
 // (com.tsangbaby.notchhome). The original dylib is left byte-identical
@@ -447,6 +448,34 @@ static NHFixHookSlot *nhfix_slot(NHFixHookSlot *__strong *slot,
 // exiting app during a switcher-entered exit.
 
 
+// HG probe data goes to its own small file (0.5.8): the geometry
+// stream floods diag.txt and the field snapshots (the part that
+// matters) kept getting lost from the copies the user could send.
+static void nhfix_hgLogF(const char *format, ...) {
+    char buffer[1024];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    NSString *dir = @"/var/mobile/Library/Logs/NotchHomeFix";
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                              withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *path = [dir stringByAppendingPathComponent:@"hgdiag.txt"];
+    NSString *stamp = [NSDateFormatter localizedStringFromDate:[NSDate date]
+                                                       dateStyle:NSDateFormatterNoStyle
+                                                       timeStyle:NSDateFormatterMediumStyle];
+    NSString *line = [NSString stringWithFormat:@"%@ %s\n", stamp, buffer];
+    NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
+    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (handle) {
+        [handle seekToEndOfFile];
+        [handle writeData:data];
+        [handle closeFile];
+    } else {
+        [data writeToFile:path atomically:YES];
+    }
+}
+
 // Field-table dump + scalar sampling for the HG probe (0.5.7):
 // names/offsets/encodings once per process; scalar values (BOOL and
 // integer/float ivars, read by offset — no KVC, no side effects) at
@@ -468,7 +497,7 @@ static void nhfix_hgDumpFieldsOnce(id object) {
         for (unsigned int i = 0; i < count; i++) {
             const char *name = ivar_getName(ivars[i]);
             const char *enc = ivar_getTypeEncoding(ivars[i]);
-            nhfix_diagLogF("hg field %s %s %s @%td",
+            nhfix_hgLogF("hg field %s %s %s @%td",
                 class_getName(cls), name ? name : "?", enc ? enc : "?",
                 ivar_getOffset(ivars[i]));
         }
@@ -524,7 +553,7 @@ static void nhfix_hgDumpVals(id object, const char *tag) {
                 [chunk appendFormat:@"%s=%s ", name ? name : "?", value];
                 inChunk++;
                 if (inChunk >= 8) {
-                    nhfix_diagLogF("hg vals@%s #%d: %s", tag, chunkIndex++, chunk.UTF8String);
+                    nhfix_hgLogF("hg vals@%s #%d: %s", tag, chunkIndex++, chunk.UTF8String);
                     [chunk setString:@""];
                     inChunk = 0;
                 }
@@ -532,10 +561,10 @@ static void nhfix_hgDumpVals(id object, const char *tag) {
             free(ivars);
         }
         if (inChunk > 0) {
-            nhfix_diagLogF("hg vals@%s #%d: %s", tag, chunkIndex, chunk.UTF8String);
+            nhfix_hgLogF("hg vals@%s #%d: %s", tag, chunkIndex, chunk.UTF8String);
         }
     } @catch (NSException *exception) {
-        nhfix_diagLogF("hg vals@%s failed", tag);
+        nhfix_hgLogF("hg vals@%s failed", tag);
     }
 }
 
@@ -592,6 +621,7 @@ static id nhfix_hgEnd(id self, SEL _cmd) {
 }
 
 static CGRect nhfix_hgFrame(id self, SEL _cmd, NSUInteger index) {
+    nhfix_hgDumpFieldsOnce(self);
     IMP orig = nhfix_savedIMP(sNHFixSlotHGFrame);
     CGRect result = orig ? ((CGRect (*)(id, SEL, NSUInteger))orig)(self, _cmd, index) : CGRectZero;
     if (!sNHFixHGMidDumped) {
@@ -599,7 +629,7 @@ static CGRect nhfix_hgFrame(id self, SEL _cmd, NSUInteger index) {
         nhfix_hgDumpVals(self, "mid");
     }
     static NSUInteger logs = 0;
-    if (logs < 60) {
+    if (logs < 25) {
         logs++;
         nhfix_diagLogF("hg frame idx=%lu from=(%.0f,%.0f,%.0f,%.0f)",
             (unsigned long)index, CGRectGetMinX(result), CGRectGetMinY(result),
@@ -611,8 +641,19 @@ static CGRect nhfix_hgFrame(id self, SEL _cmd, NSUInteger index) {
 static double nhfix_hgScale(id self, SEL _cmd, NSUInteger index) {
     IMP orig = nhfix_savedIMP(sNHFixSlotHGScale);
     double result = orig ? ((double (*)(id, SEL, NSUInteger))orig)(self, _cmd, index) : 1.0;
+    if (index == 0) {
+        static NSUInteger idx0Queries = 0;
+        static NSUInteger trajSamples = 0;
+        idx0Queries++;
+        if ((idx0Queries % 20) == 0 && trajSamples < 14) {
+            trajSamples++;
+            char tag[16];
+            snprintf(tag, sizeof(tag), "traj%lu", (unsigned long)trajSamples);
+            nhfix_hgDumpVals(self, tag);
+        }
+    }
     static NSUInteger logs = 0;
-    if (logs < 60) {
+    if (logs < 25) {
         logs++;
         nhfix_diagLogF("hg scale idx=%lu from=%.3f", (unsigned long)index, result);
     }
